@@ -13,9 +13,30 @@ every command also has `--help-json-schema` and shell completion.
 
 ## Install
 
+Releases provide static Linux builds for x86_64 and aarch64. They have no library dependencies
+and run on any distribution with OpenZFS (Debian 12/13, Ubuntu, Proxmox, ...). Each release has:
+
+* `zsync_<version>-1_amd64.deb` / `_arm64.deb`: installs `/usr/bin/zsync`, shell completions and
+  docs. It depends on `openssh-client` and recommends `zfsutils-linux` (contrib on Debian). A
+  machine that only coordinates remote hosts doesn't need ZFS itself.
+* `zsync-<version>-<arch>-linux`: the bare static executable.
+* `zsync-<version>-<arch>-linux.tar.gz`: the executable, docs and completions.
+* `SHA256SUMS`.
+
+```sh
+sudo apt install ./zsync_*_amd64.deb
+```
+
+Or build from source (Rust 1.75+):
+
 ```sh
 cargo install --git https://github.com/wankdanker/rs-zsync
+scripts/package.sh x86_64-unknown-linux-musl   # static build + tarball + .deb into dist/
 ```
+
+To cut a release, set `version` in `Cargo.toml` and push a matching tag (`v4.0.0`). The Release
+workflow builds both architectures, installs the `.deb` in a Debian 13 container, runs it, and
+publishes everything to the GitHub release (tags with a `-suffix` become pre-releases).
 
 zsync only needs to be installed on the machine you run it from. It reaches other hosts with
 OpenSSH and runs plain `zfs` there. If you'd rather run zsync on the remote hosts too, as

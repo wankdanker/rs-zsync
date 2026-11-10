@@ -58,3 +58,26 @@ tempfile = "3"
 [profile.release]
 lto = true
 codegen-units = 1
+strip = true
+
+# Debian package (built by `cargo deb`, see scripts/package.sh and .github/workflows/release.yml).
+# The binary is statically linked (musl), so it has no shared-library dependencies. zfs is only a
+# recommendation: a machine that just orchestrates remote hosts doesn't need ZFS itself.
+[package.metadata.deb]
+maintainer = "Dan VerWeire"
+copyright = "Dan VerWeire"
+license-file = ["LICENSE", "0"]
+section = "admin"
+priority = "optional"
+depends = "openssh-client"
+recommends = "zfsutils-linux | openzfs-zfsutils"
+suggests = "netcat-openbsd, zstd, lz4, pv, mbuffer, socat"
+extended-description = "zsync lists the snapshots of ZFS datasets selected by glob on a source and a destination, finds the newest snapshot they share and sends exactly what the destination is missing. It reaches hosts with OpenSSH, supports relay, direct and TCP transports, compression, bandwidth limits, progress, resumable receives, rotation, pruning and bookmarks."
+assets = [
+    ["target/release/zsync", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/zsync/", "644"],
+    ["docs/FEATURES.md", "usr/share/doc/zsync/", "644"],
+    ["target/completions/zsync.bash", "usr/share/bash-completion/completions/zsync", "644"],
+    ["target/completions/_zsync", "usr/share/zsh/vendor-completions/", "644"],
+    ["target/completions/zsync.fish", "usr/share/fish/vendor_completions.d/", "644"],
+]
