@@ -1,0 +1,83 @@
+[package]
+name = "zsync"
+version = "4.0.0-alpha.1"
+edition = "2021"
+rust-version = "1.75"
+description = "Replicate ZFS datasets by glob: find the latest common snapshot and send exactly what is missing."
+license = "MIT"
+repository = "https://github.com/wankdanker/rs-zsync"
+readme = "README.md"
+keywords = ["zfs", "replication", "snapshot", "backup", "sync"]
+categories = ["command-line-utilities", "filesystem"]
+publish = false
+
+[lib]
+name = "zsync"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zsync"
+path = "src/main.rs"
+
+# Test doubles: a stateful fake `zfs` and an `ssh` shim that runs commands locally per "host".
+# Built only with `--features fakes` so they never ship in a release build.
+[[bin]]
+name = "fake-zfs"
+path = "src/bin/fake_zfs.rs"
+required-features = ["fakes"]
+test = false
+doc = false
+
+[[bin]]
+name = "fake-ssh"
+path = "src/bin/fake_ssh.rs"
+required-features = ["fakes"]
+test = false
+doc = false
+
+[features]
+default = []
+# Build the fake zfs/ssh binaries and run the end-to-end suite against them.
+fakes = []
+# Run the integration suite against real ZFS (root, zfs kernel module, file-backed pools, sshd).
+zfs-it = []
+
+[dependencies]
+clyops = { git = "https://github.com/wankdanker/clyops", rev = "a2b251eef232f20f1ac1feaa7213d11d4c0cd4d3" }
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+globset = { version = "0.4", default-features = false }
+libc = "0.2"
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# Debian package (built by `cargo deb`, see scripts/package.sh and .github/workflows/release.yml).
+# The binary is statically linked (musl), so it has no shared-library dependencies. zfs is only a
+# recommendation: a machine that just orchestrates remote hosts doesn't need ZFS itself.
+[package.metadata.deb]
+maintainer = "Dan VerWeire"
+copyright = "Dan VerWeire"
+license-file = ["LICENSE", "0"]
+section = "admin"
+priority = "optional"
+depends = "openssh-client"
+recommends = "zfsutils-linux | openzfs-zfsutils"
+suggests = "netcat-openbsd, zstd, lz4, pv, mbuffer, socat"
+extended-description = "zsync lists the snapshots of ZFS datasets selected by glob on a source and a destination, finds the newest snapshot they share and sends exactly what the destination is missing. It reaches hosts with OpenSSH, supports relay, direct and TCP transports, compression, bandwidth limits, progress, resumable receives, rotation, pruning and bookmarks."
+assets = [
+    ["target/release/zsync", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/zsync/", "644"],
+    ["docs/FEATURES.md", "usr/share/doc/zsync/", "644"],
+    ["target/completions/zsync.bash", "usr/share/bash-completion/completions/zsync", "644"],
+    ["target/completions/_zsync", "usr/share/zsh/vendor-completions/", "644"],
+    ["target/completions/zsync.fish", "usr/share/fish/vendor_completions.d/", "644"],
+]

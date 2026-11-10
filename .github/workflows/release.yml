@@ -1,0 +1,119 @@
+name: Release
+
+# Static (musl) Linux builds for x86_64 and aarch64, each packaged as:
+#   zsync-VERSION-ARCH-linux          the bare executable
+#   zsync-VERSION-ARCH-linux.tar.gz   executable + docs + shell completions
+#   zsync_VERSION-1_ARCH.deb          Debian/Ubuntu package
+# Every PR and push to main builds and smoke-tests them (artifacts are attached to the run).
+# Pushing a tag vX.Y.Z (matching Cargo.toml's version) also publishes a GitHub release.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04, target: x86_64-unknown-linux-musl }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+      - name: Build and package
+        run: scripts/package.sh ${{ matrix.target }}
+      - name: Check the binary is static
+        run: |
+          file dist/zsync-*-linux
+          file dist/zsync-*-linux | grep -q 'static'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zsync-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  smoke:
+    name: smoke test on Debian 13 (${{ matrix.arch }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    container: debian:trixie
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: zsync-${{ matrix.arch }}
+          path: dist
+      - name: Install the .deb (zfsutils-linux lives in contrib)
+        run: |
+          sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.list.d/debian.sources
+          apt-get update
+          # The recommended zfs package must resolve (dry run only: no kernel module in a container).
+          apt-get install -s ./dist/zsync_*.deb | grep -E '^Inst zfsutils-linux'
+          apt-get install -y --no-install-recommends ./dist/zsync_*.deb
+      - name: Run it
+        run: |
+          zsync version
+          zsync push --help > /dev/null
+          zsync --help-json-schema > /dev/null
+          test -f /usr/share/bash-completion/completions/zsync
+          test -f /usr/share/zsh/vendor-completions/_zsync
+          test -f /usr/share/fish/vendor_completions.d/zsync.fish
+          # Without zfs installed, a local command fails cleanly rather than crashing.
+          if zsync list 2> err.txt; then exit 1; fi
+          grep -q 'cannot run' err.txt
+      - name: Bare executable and tarball
+        run: |
+          chmod +x dist/zsync-*-linux
+          ./dist/zsync-*-linux version
+          tar -xzf dist/zsync-*-linux.tar.gz
+          ./zsync-*-linux/zsync version
+
+  release:
+    name: publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          test "${GITHUB_REF_NAME}" = "v${version}" || { echo "tag ${GITHUB_REF_NAME} != v${version}"; exit 1; }
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=""
+          case "${GITHUB_REF_NAME}" in *-*) flags="--prerelease" ;; esac
+          gh release create "${GITHUB_REF_NAME}" dist/* --title "zsync ${GITHUB_REF_NAME#v}" --generate-notes $flags
