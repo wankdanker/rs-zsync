@@ -33,7 +33,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y zfsutils-linux openssh-server netcat-openbsd socat zstd pv
           sudo modprobe zfs || (sudo apt-get install -y "linux-modules-extra-$(uname -r)" && sudo modprobe zfs)
-          zfs version
+          sudo zfs version
       - name: Key-based root ssh to localhost
         run: |
           sudo mkdir -p /root/.ssh
