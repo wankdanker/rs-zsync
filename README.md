@@ -178,6 +178,35 @@ Each transport can also filter the stream:
 Each stage reports its own exit status, even through nested ssh, so when something fails the
 error names the stage and shows its stderr, with receive-side problems listed first.
 
+## Shell completion
+
+The `.deb` installs completion for bash, zsh and fish. Otherwise:
+
+```sh
+eval "$(zsync --completion bash)"                                  # ~/.bashrc
+eval "$(zsync --completion zsh)"                                   # ~/.zshrc, after compinit
+zsync --completion fish > ~/.config/fish/completions/zsync.fish    # fish
+```
+
+Tab offers values zsync looks up at that moment:
+
+| Where | Offers |
+|---|---|
+| first positional (glob/preset), `-s/--source` | preset names, and datasets on the source host (`-S`, or the preset's) |
+| destination positional, `-d/--destination` | datasets on the destination host (`-D`, or the preset's), so `push -D backup tank/a <Tab>` lists backup's datasets |
+| host positionals, `-S`, `-D` | `Host` names from `~/.ssh/config`, plain `~/.ssh/known_hosts` entries, and every host named in presets and config |
+| tag positional, `--tag` | tags of existing `zsync-<tag>-<timestamp>` snapshots |
+| `rotate -p`, `send -s`, `send -i` | snapshots (and bookmarks for `-i`) |
+
+Remote lookups run `zfs list` over ssh with `BatchMode=yes` and `ConnectTimeout=3`, so they
+never prompt. Any lookup that takes longer than 5 seconds is abandoned
+(`ZSYNC_COMPLETE_TIMEOUT`). To keep completion local, set `--complete-remote=false`, set
+`ZSYNC_COMPLETE_REMOTE=false`, or put `complete-remote=false` in `zsync.conf`. When a lookup
+fails or is off, the shell offers its usual completion instead.
+
+The same values are available to tools through `zsync --complete-values NAME PREFIX LIMIT
+OFFSET -- WORDS...` (JSON), which the clyops HTTP API, MCP server and web runner use.
+
 ## Resuming and retries
 
 Push receives with `zfs receive -s` by default. Replication streams are the exception, because
