@@ -37,7 +37,9 @@ impl Lock {
             if Instant::now() >= deadline {
                 bail!("EEXIST, lock file {path} is held by another zsync (waited {}ms)", wait.as_millis());
             }
-            std::thread::sleep(Duration::from_millis(50).min(deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(1))));
+            std::thread::sleep(
+                Duration::from_millis(50).min(deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(1))),
+            );
         }
     }
 }

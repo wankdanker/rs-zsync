@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: fmt, clippy, unit + fake-zfs end-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --features fakes -- -D warnings
+      - run: cargo test --features fakes
+
+  zfs:
+    name: real ZFS (file-backed pools, OpenSSH, TCP)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ZFS and tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zfsutils-linux openssh-server netcat-openbsd socat zstd pv
+          sudo modprobe zfs || (sudo apt-get install -y "linux-modules-extra-$(uname -r)" && sudo modprobe zfs)
+          zfs version
+      - name: Key-based root ssh to localhost
+        run: |
+          sudo mkdir -p /root/.ssh
+          sudo ssh-keygen -q -t ed25519 -N '' -f /root/.ssh/id_ed25519
+          sudo sh -c 'cat /root/.ssh/id_ed25519.pub >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys'
+          echo 'PermitRootLogin prohibit-password' | sudo tee /etc/ssh/sshd_config.d/zsync-ci.conf
+          sudo systemctl restart ssh || sudo service ssh restart
+          sudo sh -c 'ssh-keyscan -H localhost 127.0.0.1 >> /root/.ssh/known_hosts'
+          sudo ssh -o BatchMode=yes localhost true
+      - name: Build and install zsync (for --remote-zsync)
+        run: |
+          cargo build --release
+          sudo install target/release/zsync /usr/local/bin/zsync
+          cargo test --features zfs-it --test zfs_it --no-run
+      - name: Integration tests
+        run: |
+          sudo -E env "PATH=$PATH" ZSYNC_IT_SSH_HOST=localhost ZSYNC_IT_REMOTE_ZSYNC=1 \
+            "$(command -v cargo)" test --features zfs-it --test zfs_it -- --test-threads=1

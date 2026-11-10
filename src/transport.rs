@@ -121,7 +121,14 @@ pub struct DataPath {
 
 impl Default for DataPath {
     fn default() -> Self {
-        DataPath { mode: Mode::Relay, tcp: TcpOptions::default(), compression: Compression::None, send_pipes: vec![], recv_pipes: vec![], bwlimit: None }
+        DataPath {
+            mode: Mode::Relay,
+            tcp: TcpOptions::default(),
+            compression: Compression::None,
+            send_pipes: vec![],
+            recv_pipes: vec![],
+            bwlimit: None,
+        }
     }
 }
 
@@ -477,11 +484,16 @@ fn tcp_transfer(t: &Transfer, send_sink: LineSink, recv_sink: LineSink) -> Resul
         (Some(h), _) => h.clone(),
         (None, Some(h)) => bare_host(h).to_string(),
         (None, None) if t.source.is_local() => "127.0.0.1".into(),
-        (None, None) => bail!("the tcp transport to a local destination from a remote source needs --tcp-host (this machine's address as the source sees it)"),
+        (None, None) => bail!(
+            "the tcp transport to a local destination from a remote source needs --tcp-host (this machine's address as the source sees it)"
+        ),
     };
     let ready = Arc::new((Mutex::new(false), Condvar::new()));
     let mut recv = recv_stages(t);
-    recv.insert(0, Stage::shell("listen", &tcp_listen_stage(opts.tool, opts.bind.as_deref(), opts.port, &t.backend.zsync_words(t.destination))));
+    recv.insert(
+        0,
+        Stage::shell("listen", &tcp_listen_stage(opts.tool, opts.bind.as_deref(), opts.port, &t.backend.zsync_words(t.destination))),
+    );
     let mut listener: Running = spawn_pipeline(t.destination, &recv, Io::Null, Io::Piped, true, readiness(ready.clone(), recv_sink))?;
 
     // Wait for the listener to say it is listening (or to die).
@@ -504,7 +516,12 @@ fn tcp_transfer(t: &Transfer, send_sink: LineSink, recv_sink: LineSink) -> Resul
         if Instant::now() > deadline {
             listener.kill();
             let r = listener.wait();
-            bail!("tcp listener on {} did not report readiness within {:?}: {}", t.destination.label(), opts.ready_timeout, r.error_message());
+            bail!(
+                "tcp listener on {} did not report readiness within {:?}: {}",
+                t.destination.label(),
+                opts.ready_timeout,
+                r.error_message()
+            );
         }
     }
 
@@ -556,7 +573,10 @@ mod tests {
         let z = vec!["/usr/bin/zsync".to_string()];
         assert_eq!(tcp_listen_stage(TcpTool::Nc, None, 9000, &z), "nc -v -l 9000");
         assert_eq!(tcp_listen_stage(TcpTool::Nc, Some("10.0.0.2"), 9000, &z), "nc -v -l 10.0.0.2 9000");
-        assert_eq!(tcp_listen_stage(TcpTool::Socat, Some("10.0.0.2"), 9000, &z), "socat -d -d -u TCP-LISTEN:9000,reuseaddr,bind=10.0.0.2 STDOUT");
+        assert_eq!(
+            tcp_listen_stage(TcpTool::Socat, Some("10.0.0.2"), 9000, &z),
+            "socat -d -d -u TCP-LISTEN:9000,reuseaddr,bind=10.0.0.2 STDOUT"
+        );
         assert_eq!(tcp_listen_stage(TcpTool::Zsync, None, 9000, &z), "/usr/bin/zsync net listen 0.0.0.0:9000");
         assert_eq!(tcp_connect_stage(TcpTool::Nc, "backup", 9000, &z), "nc -N backup 9000");
         assert_eq!(tcp_connect_stage(TcpTool::Ncat, "backup", 9000, &z), "ncat --send-only backup 9000");
@@ -598,7 +618,8 @@ mod tests {
 
     #[test]
     fn human_progress_format() {
-        let e = ProgressEvent { dataset: "b/a".into(), bytes: 512 * 1024, total: Some(1024 * 1024), elapsed: 1.0, rate: 524288.0, done: false };
+        let e =
+            ProgressEvent { dataset: "b/a".into(), bytes: 512 * 1024, total: Some(1024 * 1024), elapsed: 1.0, rate: 524288.0, done: false };
         assert_eq!(human_progress(&e), "b/a: 512.0 KiB / 1.0 MiB  50% at 512.0 KiB/s");
     }
 
@@ -623,7 +644,12 @@ mod tests {
     fn relay_moves_bytes_through_filters() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out");
-        let path = DataPath { compression: Compression::Gzip, send_pipes: vec!["cat".into()], recv_pipes: vec!["cat".into()], ..Default::default() };
+        let path = DataPath {
+            compression: Compression::Gzip,
+            send_pipes: vec!["cat".into()],
+            recv_pipes: vec!["cat".into()],
+            ..Default::default()
+        };
         let stats = plain_transfer(&path, "head -c 100000 /dev/zero", &format!("cat > {}", out.display())).unwrap();
         assert_eq!(std::fs::metadata(&out).unwrap().len(), 100000);
         assert!(stats.bytes < 100000, "gzip should shrink zeros: {}", stats.bytes);
@@ -632,7 +658,9 @@ mod tests {
     #[test]
     fn relay_reports_receive_failure_first() {
         let path = DataPath::default();
-        let err = plain_transfer(&path, "head -c 1000000 /dev/zero", "head -c 10 >/dev/null; echo 'cannot receive: bad stream' >&2; exit 1").unwrap_err();
+        let err =
+            plain_transfer(&path, "head -c 1000000 /dev/zero", "head -c 10 >/dev/null; echo 'cannot receive: bad stream' >&2; exit 1")
+                .unwrap_err();
         let msg = err.to_string();
         assert!(msg.starts_with("transfer to test failed: receive:"), "{msg}");
         assert!(msg.contains("bad stream"), "{msg}");

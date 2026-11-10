@@ -6,10 +6,10 @@
 //!   and read a JSON envelope back; data streams go through `zsync send` / `zsync receive` there.
 //!   Local operations are always agentless.
 
-use crate::exec::{run, run_script};
+use crate::exec::{capture, run, run_script, CommandError};
 use crate::host::{Host, Script};
 use crate::zfs::{self, Dataset, ListQuery, RecvSpec, RenameOpts, SendSpec};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -92,9 +92,15 @@ impl Backend {
     fn rpc(&self, host: &Host, zsync: &str, req: &Request) -> Result<Value> {
         let mut argv = crate::util::split_words(zsync);
         argv.extend(["rpc".into(), "--zfs-path".into(), self.zfs.join(" "), serde_json::to_string(req)?]);
-        let out = run(host, &argv)?;
-        let env: Envelope = serde_json::from_str(out.trim())
-            .with_context(|| format!("invalid rpc response from {}: {}", host.label(), out.trim()))?;
+        // The envelope carries the error message even when the remote exits non-zero.
+        let (code, out, stderr) = capture(host, &Script::Argv(argv.clone()))?;
+        let env: Envelope = match serde_json::from_str(out.trim()) {
+            Ok(env) => env,
+            Err(_) if code != Some(0) => {
+                return Err(CommandError { host: host.label().into(), command: crate::util::shell_join(&argv), code, stderr }.into())
+            }
+            Err(e) => return Err(anyhow!("invalid rpc response from {}: {e}: {}", host.label(), out.trim())),
+        };
         if !env.ok {
             bail!("{}: {}", host.label(), env.error.map(|e| e.message).unwrap_or_else(|| "remote error".into()));
         }
@@ -206,7 +212,12 @@ impl Backend {
             Some(zsync) => {
                 let mut argv = crate::util::split_words(zsync);
                 argv.extend(["receive".into(), "--zfs-path".into(), self.zfs.join(" ")]);
-                let flags = [(spec.force, "--force"), (spec.resumable, "--resumable"), (spec.unmounted, "--unmounted"), (spec.verbose, "--verbose")];
+                let flags = [
+                    (spec.force, "--force"),
+                    (spec.resumable, "--resumable"),
+                    (spec.unmounted, "--unmounted"),
+                    (spec.verbose, "--verbose"),
+                ];
                 argv.extend(flags.iter().filter(|(on, _)| *on).map(|(_, f)| f.to_string()));
                 argv.push(spec.dataset.clone());
                 argv
@@ -286,10 +297,7 @@ mod tests {
     #[test]
     fn send_flags_for_remote_zsync() {
         let spec = SendSpec { snapshot: "p/a@2".into(), from: Some("p/a@1".into()), intermediary: true, raw: true, ..Default::default() };
-        assert_eq!(
-            zsync_send_flags(&spec).join(" "),
-            "--incremental p/a@1 --snapshot p/a@2 --intermediary --raw"
-        );
+        assert_eq!(zsync_send_flags(&spec).join(" "), "--incremental p/a@1 --snapshot p/a@2 --intermediary --raw");
         let spec = SendSpec { resume_token: Some("t".into()), progress: true, ..Default::default() };
         assert_eq!(zsync_send_flags(&spec).join(" "), "--resume-token t --progress");
     }

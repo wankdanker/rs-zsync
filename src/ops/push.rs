@@ -143,7 +143,8 @@ fn sync_dataset(ctx: &Ctx, src_host: &Host, source: &str, opts: &PushOpts) -> Re
     let mut action = plan::decide(&diff, opts.intermediary, opts.replication);
 
     if action == Action::Diverged {
-        let renamed = renamed_name(&target, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0));
+        let renamed =
+            renamed_name(&target, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0));
         if opts.fallback_destroy {
             crate::verbose!("{target}: no common snapshot with {source}; destroying destination (--fallback-destroy-destination)");
             if !ctx.dry_run {

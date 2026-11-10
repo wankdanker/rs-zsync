@@ -6,7 +6,8 @@ use serde::Serialize;
 /// Left-aligned columns separated by two spaces, trailing whitespace trimmed.
 pub fn table(rows: &[Vec<String>]) -> String {
     let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
-    let widths: Vec<usize> = (0..cols).map(|c| rows.iter().filter_map(|r| r.get(c)).map(|s| s.chars().count()).max().unwrap_or(0)).collect();
+    let widths: Vec<usize> =
+        (0..cols).map(|c| rows.iter().filter_map(|r| r.get(c)).map(|s| s.chars().count()).max().unwrap_or(0)).collect();
     rows.iter()
         .map(|r| {
             let line: Vec<String> = r.iter().enumerate().map(|(i, cell)| format!("{cell:<w$}", w = widths[i])).collect();

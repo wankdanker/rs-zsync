@@ -35,12 +35,17 @@ pub fn snapshot(ctx: &Ctx, sel: &Selection, o: &SnapOpts) -> Result<Outcome<Stri
         }
         return Ok(super::Outcome { results: names, failures: vec![] });
     }
-    for_each(ctx, datasets, |d| d.name.clone(), |d| {
-        let name = full_name(&d.name, o, &format_now(&o.date_format));
-        crate::verbose!("snapshot {name} on {}", sel.host.label());
-        if !ctx.dry_run {
-            ctx.backend.snapshot(&sel.host, std::slice::from_ref(&name), false)?;
-        }
-        Ok(name)
-    })
+    for_each(
+        ctx,
+        datasets,
+        |d| d.name.clone(),
+        |d| {
+            let name = full_name(&d.name, o, &format_now(&o.date_format));
+            crate::verbose!("snapshot {name} on {}", sel.host.label());
+            if !ctx.dry_run {
+                ctx.backend.snapshot(&sel.host, std::slice::from_ref(&name), false)?;
+            }
+            Ok(name)
+        },
+    )
 }

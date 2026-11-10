@@ -95,6 +95,14 @@ pub fn run_script(host: &Host, script: &Script, input: Option<&[u8]>) -> Result<
     Ok(stdout)
 }
 
+/// Run a script on `host` and return (exit code, stdout, stderr) without judging the status.
+pub fn capture(host: &Host, script: &Script) -> Result<(Option<i32>, String, String)> {
+    let (mut cmd, display) = command(host, script);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = cmd.output().map_err(|e| anyhow!("cannot run {display} on {}: {e}", host.label()))?;
+    Ok((out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned()))
+}
+
 /// One stage of a pipeline: a shell snippet with a label used in its exit sentinel.
 #[derive(Clone, Debug)]
 pub struct Stage {
@@ -114,11 +122,7 @@ impl Stage {
 /// `{ (a); echo "ZSYNC_RC:l1:$?" >&2; } | { (b); echo "ZSYNC_RC:l2:$?" >&2; }`. The subshell keeps
 /// an `exit` in a user-supplied snippet from skipping its sentinel.
 pub fn pipeline_script(stages: &[Stage]) -> String {
-    stages
-        .iter()
-        .map(|s| format!("{{ ({}); echo \"{SENTINEL}{}:$?\" >&2; }}", s.shell, s.label))
-        .collect::<Vec<_>>()
-        .join(" | ")
+    stages.iter().map(|s| format!("{{ ({}); echo \"{SENTINEL}{}:$?\" >&2; }}", s.shell, s.label)).collect::<Vec<_>>().join(" | ")
 }
 
 /// Parse a sentinel line into (label, exit code).
@@ -221,14 +225,7 @@ impl Io {
 /// Spawn `stages` as one pipeline on `host`. stderr is always consumed: sentinels are recorded,
 /// other lines go to `sink` and a short tail is kept for error messages. With `drain_stdout`,
 /// stdout is read and fed to `sink` too (used for `zfs receive -v`).
-pub fn spawn_pipeline(
-    host: &Host,
-    stages: &[Stage],
-    stdin: Io,
-    stdout: Io,
-    drain_stdout: bool,
-    sink: LineSink,
-) -> Result<Running> {
+pub fn spawn_pipeline(host: &Host, stages: &[Stage], stdin: Io, stdout: Io, drain_stdout: bool, sink: LineSink) -> Result<Running> {
     let script = Script::Shell(pipeline_script(stages));
     let (mut cmd, display) = command(host, &script);
     let drain = drain_stdout && matches!(stdout, Io::Piped);
@@ -352,11 +349,8 @@ mod tests {
 
     #[test]
     fn pipeline_reports_each_stage() {
-        let stages = vec![
-            Stage::shell("one", "printf abc"),
-            Stage::shell("two", "tr a-z A-Z"),
-            Stage::shell("three", "cat; echo oops >&2; exit 4"),
-        ];
+        let stages =
+            vec![Stage::shell("one", "printf abc"), Stage::shell("two", "tr a-z A-Z"), Stage::shell("three", "cat; echo oops >&2; exit 4")];
         let mut r = spawn_pipeline(&local(), &stages, Io::Null, Io::Piped, false, quiet()).unwrap();
         let mut out = String::new();
         std::io::Read::read_to_string(&mut r.take_stdout().unwrap(), &mut out).unwrap();

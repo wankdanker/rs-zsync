@@ -65,7 +65,8 @@ impl Destination {
 
 /// List datasets matching the selection, in `zfs list` order.
 pub fn list_datasets(ctx: &Ctx, sel: &Selection) -> Result<Vec<Dataset>> {
-    let query = ListQuery { root: sel.source.clone(), types: sel.types.clone(), recursive: sel.recursive, depth: None, sort_createtxg: false };
+    let query =
+        ListQuery { root: sel.source.clone(), types: sel.types.clone(), recursive: sel.recursive, depth: None, sort_createtxg: false };
     crate::debug!(
         "list(): looking up datasets: type {:?}, source {}:{:?}, glob {:?}, exclude {:?}",
         sel.types,

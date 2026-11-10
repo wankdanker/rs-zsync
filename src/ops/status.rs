@@ -24,8 +24,8 @@ pub struct StatusRow {
 pub fn diff_one(ctx: &Ctx, sel: &Selection, dest: &Destination, source: &str) -> Result<(plan::Diff, String, bool)> {
     let target = dest.for_source(source);
     crate::debug!("status(): requesting diff between {source} and {target} on {}", dest.host.label());
-    let (src, marks) = snapshots_of(ctx, &sel.host, source, true)?
-        .ok_or_else(|| anyhow!("dataset does not exist: {}:{source}", sel.host.label()))?;
+    let (src, marks) =
+        snapshots_of(ctx, &sel.host, source, true)?.ok_or_else(|| anyhow!("dataset does not exist: {}:{source}", sel.host.label()))?;
     let side = match snapshots_of(ctx, &dest.host, &target, false)? {
         Some((snaps, _)) => DestSide { exists: true, snaps },
         None => DestSide { exists: false, snaps: vec![] },
@@ -37,17 +37,22 @@ pub fn diff_one(ctx: &Ctx, sel: &Selection, dest: &Destination, source: &str) ->
 
 pub fn status(ctx: &Ctx, sel: &Selection, dest: &Destination, intermediary: bool, replication: bool) -> Result<Outcome<StatusRow>> {
     let datasets = list_datasets(ctx, sel)?;
-    for_each(ctx, datasets, |d| d.name.clone(), |ds| {
-        let (diff, target, resume_pending) = diff_one(ctx, sel, dest, &ds.name)?;
-        Ok(StatusRow {
-            source: ds.name.clone(),
-            destination: target,
-            destination_host: dest.host.label().to_string(),
-            up_to_date: !diff.work,
-            latest: diff.from_snap.clone(),
-            action: plan::decide(&diff, intermediary, replication),
-            resume_pending,
-            diff,
-        })
-    })
+    for_each(
+        ctx,
+        datasets,
+        |d| d.name.clone(),
+        |ds| {
+            let (diff, target, resume_pending) = diff_one(ctx, sel, dest, &ds.name)?;
+            Ok(StatusRow {
+                source: ds.name.clone(),
+                destination: target,
+                destination_host: dest.host.label().to_string(),
+                up_to_date: !diff.work,
+                latest: diff.from_snap.clone(),
+                action: plan::decide(&diff, intermediary, replication),
+                resume_pending,
+                diff,
+            })
+        },
+    )
 }

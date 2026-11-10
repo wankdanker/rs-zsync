@@ -31,8 +31,7 @@ impl Selector {
 
     /// True when the name matches any include glob (or there are none) and no exclude glob.
     pub fn matches(&self, name: &str) -> bool {
-        (self.include.is_empty() || self.include.iter().any(|g| g.is_match(name)))
-            && !self.exclude.iter().any(|g| g.is_match(name))
+        (self.include.is_empty() || self.include.iter().any(|g| g.is_match(name))) && !self.exclude.iter().any(|g| g.is_match(name))
     }
 
     pub fn filter<T, F: Fn(&T) -> &str>(&self, items: Vec<T>, name: F) -> Vec<T> {

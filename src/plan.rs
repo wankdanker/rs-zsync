@@ -91,9 +91,7 @@ pub fn diff(source: &str, source_snaps: &[Snap], source_bookmarks: &[Snap], dest
     };
 
     // Newest destination snapshot that also exists on the source.
-    let common = dest.snaps.iter().enumerate().rev().find_map(|(di, ds)| {
-        source_snaps.iter().position(|s| same(s, ds)).map(|si| (di, si))
-    });
+    let common = dest.snaps.iter().enumerate().rev().find_map(|(di, ds)| source_snaps.iter().position(|s| same(s, ds)).map(|si| (di, si)));
 
     match common {
         Some((di, si)) => {
@@ -294,7 +292,10 @@ mod tests {
         let bms = vec![Snap { name: "b".into(), guid: Some(2), createtxg: Some(20) }];
         let dst = DestSide {
             exists: true,
-            snaps: vec![Snap { name: "a".into(), guid: Some(1), createtxg: Some(5) }, Snap { name: "b".into(), guid: Some(2), createtxg: Some(6) }],
+            snaps: vec![
+                Snap { name: "a".into(), guid: Some(1), createtxg: Some(5) },
+                Snap { name: "b".into(), guid: Some(2), createtxg: Some(6) },
+            ],
         };
         let d = diff("p/x", &src, &bms, Some(&dst)).unwrap();
         assert_eq!(d.from_snap.as_deref(), Some("p/x#b"));
@@ -349,9 +350,8 @@ mod tests {
     #[test]
     fn exhaustive_small_universes() {
         let universe = ["a", "b", "c", "d"];
-        let subsets: Vec<Vec<&str>> = (0..16u32)
-            .map(|m| universe.iter().enumerate().filter(|(i, _)| m & (1 << i) != 0).map(|(_, s)| *s).collect())
-            .collect();
+        let subsets: Vec<Vec<&str>> =
+            (0..16u32).map(|m| universe.iter().enumerate().filter(|(i, _)| m & (1 << i) != 0).map(|(_, s)| *s).collect()).collect();
         for src in subsets.iter().filter(|s| !s.is_empty()) {
             for dst in &subsets {
                 let d = diff("p", &snaps(src), &[], Some(&dest(dst))).unwrap();
