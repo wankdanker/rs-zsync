@@ -109,7 +109,13 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Checksums
-        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+        run: |
+          cd dist
+          # GitHub replaces "~" in asset names with "." on upload; rename first so SHA256SUMS
+          # lists the names people actually download (the .deb's own version keeps its "~").
+          for f in *~*; do [ -e "$f" ] && mv "$f" "$(printf '%s' "$f" | tr '~' '.')"; done
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
