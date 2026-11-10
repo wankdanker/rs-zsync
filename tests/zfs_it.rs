@@ -36,7 +36,9 @@ impl Pool {
         let img = dir.path().join("pool.img");
         let name = format!("zsit{}{}{}", tag, std::process::id() % 10000, COUNTER.fetch_add(1, Ordering::SeqCst));
         sh(&format!("truncate -s 512M {}", img.display()));
-        sh(&format!("zpool create -f -O mountpoint=/{name} {name} {}", img.display()));
+        // atime=off: reading files on a mounted destination (as these tests do) would otherwise
+        // count as a modification and make the next incremental receive fail without -F.
+        sh(&format!("zpool create -f -O atime=off -O mountpoint=/{name} {name} {}", img.display()));
         Pool { name, _dir: dir }
     }
     fn ds(&self, rel: &str) -> String {

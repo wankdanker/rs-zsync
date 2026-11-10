@@ -76,6 +76,10 @@ For each dataset matched on the source:
    unless you pass `-e/--fallback-rename-destination` (rename the destination to
    `<name>-renamed-<epoch-ms>`) or `-X/--fallback-destroy-destination`.
 
+Keep backup destinations unmodified between pushes, or incrementals will need `-F` (which rolls
+back local changes). On a mounted destination even reading files changes it through access
+times, so receive with `--unmounted`, set `readonly=on`, or set `atime=off` on the destination.
+
 `zsync status` shows this plan without changing anything. With `--format json` it also shows the
 planned action, which snapshots are missing, and any destination snapshots newer than the common
 base (receiving those needs `-F/--force`, which rolls the destination back).
