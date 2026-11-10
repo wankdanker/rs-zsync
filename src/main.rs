@@ -5,12 +5,13 @@
 //! become option defaults through the environment clyops reads, so precedence is
 //! command line > positional > preset > environment > default.
 
-use clyops::{Cli, Parsed, Values};
+use clyops::{Cli, CompleteRequest, CompleteResult, Parsed, Values};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use zsync::backend::{serve_rpc, Backend, Mode as BackendMode};
+use zsync::complete::{self as completion, OptionShapes};
 use zsync::config::{Config, Settings};
 use zsync::host::SshConfig;
 use zsync::ops::{self, Ctx, Destination, Outcome, Selection};
@@ -23,10 +24,11 @@ const EXIT_ERROR: i32 = 1;
 const EXIT_CONFIG: i32 = 2;
 const EXIT_PARTIAL: i32 = 3;
 
-/// long option name -> (env/var name, is array)
+/// long option name -> (env/var name, is array), and each command's option shapes (for completion).
 #[derive(Default)]
 struct Registry {
     vars: HashMap<String, (String, bool)>,
+    cmds: HashMap<String, OptionShapes>,
 }
 
 fn var_for(long: &str) -> String {
@@ -41,6 +43,7 @@ fn var_for(long: &str) -> String {
 struct Reg<'a> {
     cli: &'a mut Cli,
     reg: &'a mut Registry,
+    cmd: &'static str,
 }
 
 impl Reg<'_> {
@@ -52,12 +55,14 @@ impl Reg<'_> {
             h.rule(rule);
         }
         self.reg.vars.insert(long.into(), (var, false));
+        self.reg.cmds.entry(self.cmd.into()).or_default().add(long, short, default != "flag");
         self
     }
     fn a(&mut self, long: &str, desc: &str, group: &str) -> &mut Self {
         let var = var_for(long);
         self.cli.opt_array(&var, long, "", desc).group(group);
         self.reg.vars.insert(long.into(), (var, true));
+        self.reg.cmds.entry(self.cmd.into()).or_default().add(long, "", true);
         self
     }
     fn ssh(&mut self) -> &mut Self {
@@ -70,6 +75,14 @@ impl Reg<'_> {
             .o("zfs-path", "", "zfs", "zfs command on every host (e.g. \"sudo -n zfs\")", "SSH", "")
             .o("remote-zsync", "", "flag", "run zsync on remote hosts (zsync rpc/send/receive) instead of plain zfs", "SSH", "")
             .o("remote-zsync-path", "", "zsync", "zsync command on remote hosts", "SSH", "")
+            .o(
+                "complete-remote",
+                "",
+                "true",
+                "on Tab, list datasets on remote hosts over ssh (BatchMode); false keeps completion local",
+                "SSH",
+                "bool",
+            )
     }
     fn select(&mut self, recursive: &str) -> &mut Self {
         self.o("type", "t", "optional", "filter file system types", "Selection", "")
@@ -200,15 +213,17 @@ fn build(reg: &mut Registry) -> Cli {
         let c = cli.command("list", "list file systems");
         c.arg_variadic("ARGS", "[glob/preset]", "");
         c.effects(&["read-only"]);
-        Reg { cli: c, reg }.ssh().select("recursive fs lookup").common(true);
+        Reg { cli: &mut *c, reg, cmd: "list" }.ssh().select("recursive fs lookup").common(true);
+        completers(c, "list", reg);
     }
     {
         let c = cli.command("status", "get the sync status between a source dataset and destination dataset");
         c.arg_variadic("ARGS", "[glob/preset] [destination] [destination-host]", "");
         c.effects(&["read-only"]);
-        Reg { cli: c, reg }.ssh().select("Send all fileystems/volumes in source-dataset").dest()
+        Reg { cli: &mut *c, reg, cmd: "status" }.ssh().select("Send all fileystems/volumes in source-dataset").dest()
             .o("continue", "c", "flag", "continue on to the next dataset if errors are encountered", "Control", "")
             .common(true);
+        completers(c, "status", reg);
     }
     for (name, desc, args) in [
         ("push", "push a local dataset to another dataset optionally on a remote host", "[glob/preset] [destination] [destination-host]"),
@@ -217,12 +232,13 @@ fn build(reg: &mut Registry) -> Cli {
         let c = cli.command(name, desc);
         c.arg_variadic("ARGS", args, "");
         c.effects(&["network"]);
-        Reg { cli: c, reg }.ssh().select("Send all fileystems/volumes in source-dataset").dest().transfer().common(true);
+        Reg { cli: &mut *c, reg, cmd: name }.ssh().select("Send all fileystems/volumes in source-dataset").dest().transfer().common(true);
+        completers(c, name, reg);
     }
     {
         let c = cli.command("snapshot", "create snapshots on datasets matching a glob using an optional tag");
         c.arg_variadic("ARGS", "[glob/preset] [tag] [dateformat]", "");
-        Reg { cli: c, reg }.ssh().select("Send all fileystems/volumes in source-dataset")
+        Reg { cli: &mut *c, reg, cmd: "snapshot" }.ssh().select("Send all fileystems/volumes in source-dataset")
             .o("snapshot", "p", "optional", "exact snapshot name to use", "Snapshot", "")
             .o("tag", "", "optional", "tag name for snapshot", "Snapshot", "")
             .o("date-format", "T", "yyyymmddHHMMssl", "date format - see https://www.npmjs.com/package/dateformat", "Snapshot", "")
@@ -231,12 +247,13 @@ fn build(reg: &mut Registry) -> Cli {
             .o("continue", "c", "flag", "continue on to the next dataset if errors are encountered", "Snapshot", "")
             .o("dry-run", "", "flag", "show the snapshots without creating them", "Snapshot", "")
             .common(true);
+        completers(c, "snapshot", reg);
     }
     {
         let c = cli.command("rotate", "rotate snapshots keeping a certain number");
         c.arg_variadic("ARGS", "[glob/preset] [tag] [keep] [destination] [destination-host]", "");
         c.effects(&["destructive"]);
-        Reg { cli: c, reg }.ssh().select("Send all fileystems/volumes in source-dataset").dest()
+        Reg { cli: &mut *c, reg, cmd: "rotate" }.ssh().select("Send all fileystems/volumes in source-dataset").dest()
             .o("keep", "K", "optional", "number of snapshots to keep", "Rotate", "int:0-")
             .o("snapshot", "p", "optional", "exact snapshot name to remove", "Rotate", "")
             .o("tag", "", "optional", "tag name to process for rotation", "Rotate", "")
@@ -246,35 +263,38 @@ fn build(reg: &mut Registry) -> Cli {
             .o("destination-side", "", "flag", "rotate the destination's snapshots instead of the source's", "Rotate", "")
             .o("dry-run", "", "flag", "show what would be destroyed", "Rotate", "")
             .common(true);
+        completers(c, "rotate", reg);
     }
     {
         let c = cli.command("prune", "destroy destination snapshots that no longer exist on the source");
         c.arg_variadic("ARGS", "[glob/preset] [destination] [destination-host]", "");
         c.effects(&["destructive"]);
-        Reg { cli: c, reg }.ssh().select("Send all fileystems/volumes in source-dataset").dest()
+        Reg { cli: &mut *c, reg, cmd: "prune" }.ssh().select("Send all fileystems/volumes in source-dataset").dest()
             .o("tag", "", "optional", "only snapshots with this tag", "Prune", "")
             .o("prefix", "", "zsync", "snapshot name prefix", "Prune", "")
             .o("all", "", "flag", "consider every snapshot, not only zsync-named ones", "Prune", "")
             .o("continue", "c", "flag", "continue on to the next dataset if errors are encountered", "Prune", "")
             .o("dry-run", "", "flag", "show what would be destroyed", "Prune", "")
             .common(true);
+        completers(c, "prune", reg);
     }
     {
         let c = cli.command("destroy", "destroy dataset identified by source optionally on remote source-host");
         c.arg_variadic("ARGS", "[source] [source-host]", "");
         c.effects(&["destructive"]);
-        Reg { cli: c, reg }.ssh()
+        Reg { cli: &mut *c, reg, cmd: "destroy" }.ssh()
             .o("recursive", "R", "flag", "recursively destroy children and snapshots", "Selection", "")
             .o("source", "s", "optional", "source-dataset, eg: pool/vol1, pool", "Selection", "")
             .o("source-host", "S", "optional", "host on which the source dataset resides", "Selection", "")
             .o("dry-run", "", "flag", "show what would be destroyed", "Control", "")
             .common(false);
+        completers(c, "destroy", reg);
     }
     {
         let c = cli.command("rename", "rename dataset identified by source to name, optionally on remote source-host");
         c.arg_variadic("ARGS", "[source] [name] [source-host]", "");
         c.effects(&["destructive"]);
-        Reg { cli: c, reg }.ssh()
+        Reg { cli: &mut *c, reg, cmd: "rename" }.ssh()
             .o("source", "s", "optional", "source-dataset, eg: pool/vol1, pool", "Selection", "")
             .o("source-host", "S", "optional", "host on which the source dataset resides", "Selection", "")
             .o("name", "n", "optional", "the new name of source-dataset, eg: pool/vol1-copy, pool2", "Selection", "")
@@ -283,12 +303,13 @@ fn build(reg: &mut Registry) -> Cli {
             .o("parents", "", "flag", "create missing parents (zfs rename -p)", "Selection", "")
             .o("dry-run", "", "flag", "show the rename without doing it", "Control", "")
             .common(false);
+        completers(c, "rename", reg);
     }
     {
         let c = cli.command("receive", "receive a dataset via stdin");
         c.arg_variadic("ARGS", "[dataset]", "");
         c.stdin("ZFS send stream", "application/octet-stream");
-        Reg { cli: c, reg }.ssh()
+        Reg { cli: &mut *c, reg, cmd: "receive" }.ssh()
             .o("force", "F", "flag", "force receive (may cause rollback)", "Receive", "")
             .o("destination", "d", "optional", "destination dataset", "Receive", "")
             .o("resumable", "", "flag", "keep partial state if interrupted (zfs receive -s)", "Receive", "")
@@ -296,11 +317,12 @@ fn build(reg: &mut Registry) -> Cli {
             .o("abort", "", "flag", "discard partially received state (zfs receive -A) and exit", "Receive", "")
             .o("listen", "", "optional", "read the stream from one TCP connection on ADDR:PORT instead of stdin", "Receive", "")
             .common(false);
+        completers(c, "receive", reg);
     }
     {
         let c = cli.command("send", "send a dataset via stdout");
         c.stdout("ZFS send stream", "application/octet-stream");
-        Reg { cli: c, reg }.ssh()
+        Reg { cli: &mut *c, reg, cmd: "send" }.ssh()
             .o("incremental", "i", "optional", "do an incremental send starting with [dataset]", "Send", "")
             .o("snapshot", "s", "optional", "the final snapshot to send", "Send", "")
             .o("compressed", "m", "flag", "send blocks compressed as they are on disk", "Send", "")
@@ -313,11 +335,12 @@ fn build(reg: &mut Registry) -> Cli {
             .o("progress", "", "flag", "parsable progress on stderr (zfs send -v -P)", "Send", "")
             .o("connect", "", "optional", "write the stream to HOST:PORT instead of stdout", "Send", "")
             .common(false);
+        completers(c, "send", reg);
     }
     {
         let c = cli.command("rpc", "run one JSON request locally and print a JSON envelope (used by --remote-zsync)");
         c.arg("REQUEST", "request JSON", "", "json");
-        Reg { cli: c, reg }.o("zfs-path", "", "zfs", "zfs command", "Options", "");
+        Reg { cli: c, reg, cmd: "rpc" }.o("zfs-path", "", "zfs", "zfs command", "Options", "");
     }
     {
         let net = cli.command("net", "TCP stream helpers used by --tcp-tool zsync");
@@ -410,30 +433,47 @@ fn load_config(explicit: Option<&str>) -> Result<Config, (i32, String)> {
     }
 }
 
-fn parse_args(argv: &[String]) -> (Cli, Args, String) {
+/// The first pass over a command line: the command, its positionals, and the environment that
+/// carries config defaults and preset settings into the second parse.
+struct Prepared {
+    cmd: String,
+    args: Vec<String>,
+    preset_found: bool,
+    preset_arrays: Settings,
+    env: HashMap<String, String>,
+    json: bool,
+    config: Config,
+}
+
+enum PrepError {
+    /// clyops can't parse the line (or it asks for help/schema/completion): let `run_with` answer.
+    Usage,
+    Config(i32, String, bool),
+}
+
+fn prepare(argv: &[String]) -> Result<Prepared, PrepError> {
     // clyops removes CLYOPS_FDS from the environment on its first parse; keep it for the second.
     let mut env: HashMap<String, String> = std::env::vars().collect();
     let mut reg = Registry::default();
     let mut first = build(&mut reg);
-    // Let clyops handle --help, schema, completion and usage errors in the normal way.
     if !matches!(first.parse(argv), Parsed::Ok) {
-        first.run_with(argv);
-        std::process::exit(EXIT_ERROR);
+        return Err(PrepError::Usage);
     }
     let cmd = first.command_path().join(" ");
-    let raw_args: Vec<String> = first.values().strs("ARGS").into_iter().map(String::from).collect();
+    let args: Vec<String> = first.values().strs("ARGS").into_iter().map(String::from).collect();
     let json = first.values().str("ZSYNC_FORMAT") == "json";
 
     let mut preset_arrays = Settings::new();
-    let mut args = raw_args.clone();
+    let mut preset_found = false;
+    let mut config = Config::default();
     if !matches!(cmd.as_str(), "rpc" | "net listen" | "net connect" | "version") {
         let explicit = Some(first.values().str("ZSYNC_CONFIG")).filter(|s| !s.is_empty());
-        let config = load_config(explicit).unwrap_or_else(|(code, msg)| die(code, json, &msg));
+        config = load_config(explicit).map_err(|(code, msg)| PrepError::Config(code, msg, json))?;
         let preset = args.first().filter(|_| takes_preset(&cmd)).cloned();
         let (settings, found) = config.resolve(preset.as_deref());
         if found {
             zsync::debug!("using preset {}", preset.as_deref().unwrap_or(""));
-            args.remove(0);
+            preset_found = true;
         }
         for (long, values) in settings {
             match reg.vars.get(&long) {
@@ -449,18 +489,203 @@ fn parse_args(argv: &[String]) -> (Cli, Args, String) {
             }
         }
     }
+    Ok(Prepared { cmd, args, preset_found, preset_arrays, env, json, config })
+}
 
-    let mut reg2 = Registry::default();
-    let mut cli = build(&mut reg2);
-    cli.env(env);
-    let values = cli.run_with(argv);
-    let names = positionals(&cmd);
-    if args.len() > names.len() && !names.is_empty() {
-        die(EXIT_ERROR, json, &format!("too many arguments for {cmd}: {}", args[names.len()..].join(" ")));
+/// Map positionals to their option names. A preset name fills the first (glob) slot, so the
+/// words after it are the destination and so on, as in node-zsync.
+fn make_args(cli: &Cli, values: Values, reg: Registry, p: &Prepared, strict: bool) -> Result<Args, String> {
+    let names = positionals(&p.cmd);
+    if strict && p.args.len() > names.len() && !names.is_empty() {
+        return Err(format!("too many arguments for {}: {}", p.cmd, p.args[names.len()..].join(" ")));
     }
-    let positional: HashMap<String, String> = names.iter().zip(args.iter()).map(|(n, v)| (n.to_string(), v.clone())).collect();
-    let sources = reg2.vars.keys().map(|l| (l.clone(), cli.source(l))).collect();
-    (cli, Args { values, sources, positional, preset_arrays, reg: reg2 }, cmd)
+    let skip = usize::from(p.preset_found);
+    let positional: HashMap<String, String> = names.iter().zip(p.args.iter()).skip(skip).map(|(n, v)| (n.to_string(), v.clone())).collect();
+    let sources = reg.vars.keys().map(|l| (l.clone(), cli.source(l))).collect();
+    Ok(Args { values, sources, positional, preset_arrays: p.preset_arrays.clone(), reg })
+}
+
+fn parse_args(argv: &[String]) -> (Cli, Args, String) {
+    let p = match prepare(argv) {
+        Ok(p) => p,
+        Err(PrepError::Usage) => {
+            // Let clyops handle --help, schema, completion and usage errors in the normal way.
+            build(&mut Registry::default()).run_with(argv);
+            std::process::exit(EXIT_ERROR);
+        }
+        Err(PrepError::Config(code, msg, json)) => die(code, json, &msg),
+    };
+    let mut reg = Registry::default();
+    let mut cli = build(&mut reg);
+    cli.env(p.env.clone());
+    let values = cli.run_with(argv);
+    let args = make_args(&cli, values, reg, &p, true).unwrap_or_else(|m| die(EXIT_ERROR, p.json, &m));
+    (cli, args, p.cmd)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tab completion (clyops `complete`, spec 9.2): values come from zfs (locally or over ssh),
+// presets and config files, and ssh's own host lists.
+// ---------------------------------------------------------------------------------------------
+
+/// What a completer is registered on.
+#[derive(Clone, Copy)]
+enum Slot {
+    /// The command's positionals (`ARGS`), decided by position.
+    Args,
+    /// An option's value.
+    Opt(&'static str),
+}
+
+/// Register completers on a command for its positionals and the options that name datasets,
+/// hosts, tags or snapshots.
+fn completers(c: &mut Cli, cmd: &'static str, reg: &Registry) {
+    let shapes = Arc::new(reg.cmds.get(cmd).cloned().unwrap_or_default());
+    if !positionals(cmd).is_empty() {
+        let sh = shapes.clone();
+        c.complete("ARGS", move |req| complete_slot(cmd, Slot::Args, &sh, req));
+    }
+    for long in ["source", "source-host", "destination", "destination-host", "tag", "snapshot", "incremental"] {
+        if !shapes.takes_value.contains(long) || (cmd == "snapshot" && long == "snapshot") {
+            continue;
+        }
+        let sh = shapes.clone();
+        c.complete(long, move |req| complete_slot(cmd, Slot::Opt(long), &sh, req));
+    }
+}
+
+fn complete_slot(cmd: &'static str, slot: Slot, shapes: &OptionShapes, req: &CompleteRequest) -> CompleteResult {
+    completion_values(cmd, slot, shapes, req).map_err(|e| e.into())
+}
+
+/// The words typed so far as an `Args` (with config and preset settings applied), and the config.
+fn resolve_typed(cmd: &str, words: &[String]) -> Result<(Args, Config), String> {
+    let mut argv: Vec<String> = cmd.split(' ').map(String::from).collect();
+    argv.extend(words.iter().cloned());
+    let p = match prepare(&argv) {
+        Ok(p) => p,
+        Err(PrepError::Usage) => return Err("cannot parse the words typed so far".into()),
+        Err(PrepError::Config(_, msg, _)) => return Err(msg),
+    };
+    let mut reg = Registry::default();
+    let mut cli = build(&mut reg);
+    cli.env(p.env.clone());
+    if !matches!(cli.parse(&argv), Parsed::Ok) {
+        return Err("cannot parse the words typed so far".into());
+    }
+    let values = cli.values().clone();
+    let args = make_args(&cli, values, reg, &p, false)?;
+    Ok((args, p.config))
+}
+
+/// Results of zfs listings made during one completion request (bash asks every completer at
+/// once, and several want the same listing).
+type ListMemo = HashMap<String, Result<Vec<zsync::zfs::Dataset>, String>>;
+static LIST_MEMO: std::sync::OnceLock<std::sync::Mutex<ListMemo>> = std::sync::OnceLock::new();
+
+/// List on `host` with a deadline, so a slow host never hangs the shell.
+fn completion_list(ctx: &Ctx, host: &zsync::host::Host, query: zsync::zfs::ListQuery) -> Result<Vec<zsync::zfs::Dataset>, String> {
+    let key = format!("{}|{}|{:?}", host.label(), ctx.backend.zfs.join(" "), query);
+    let memo = LIST_MEMO.get_or_init(Default::default);
+    if let Some(hit) = memo.lock().unwrap().get(&key) {
+        return hit.clone();
+    }
+    let timeout = std::env::var("ZSYNC_COMPLETE_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(5u64);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (backend, h) = (ctx.backend.clone(), host.clone());
+    std::thread::spawn(move || {
+        let _ = tx.send(backend.list(&h, &query).map_err(|e| format!("{e:#}")));
+    });
+    let result = rx
+        .recv_timeout(Duration::from_secs(timeout))
+        .unwrap_or_else(|_| Err(format!("listing on {} took longer than {timeout}s", host.label())));
+    memo.lock().unwrap().insert(key, result.clone());
+    result
+}
+
+fn completion_values(cmd: &str, slot: Slot, shapes: &OptionShapes, req: &CompleteRequest) -> Result<Vec<String>, String> {
+    let walk = completion::walk(&req.words, shapes);
+    let name = match slot {
+        Slot::Opt(long) => {
+            // The shell asks every completer on each Tab; only answer for the option being typed.
+            if walk.pending.as_deref().is_some_and(|p| p != long) {
+                return Err("another option is being completed".into());
+            }
+            long
+        }
+        Slot::Args => {
+            if walk.pending.is_some() {
+                return Err("an option value is being completed".into());
+            }
+            *positionals(cmd).get(walk.positionals.len()).ok_or("no more arguments")?
+        }
+    };
+    let (args, config) = resolve_typed(cmd, &walk.parseable)?;
+    let mut ctx = ctx_from(&args)?;
+    // Never prompt (passwords, host keys) and give up quickly on unreachable hosts.
+    let mut ssh = (*ctx.ssh).clone();
+    ssh.options.extend(["BatchMode=yes".to_string(), "ConnectTimeout=3".to_string()]);
+    ctx.ssh = Arc::new(ssh);
+    let remote_ok = args.str("complete-remote") != "false";
+    let host = |name: Option<String>| -> Result<zsync::host::Host, String> {
+        let h = ctx.host(name.as_deref());
+        if !h.is_local() && !remote_ok {
+            return Err("remote completion is off (--complete-remote=false)".into());
+        }
+        Ok(h)
+    };
+    let datasets = |h: zsync::host::Host| -> Result<Vec<String>, String> {
+        let query = zsync::zfs::ListQuery { types: args.opt("type"), ..Default::default() };
+        Ok(completion_list(&ctx, &h, query)?.into_iter().map(|d| d.name).collect())
+    };
+    let snapshots = |h: zsync::host::Host, types: &str| -> Result<Vec<zsync::zfs::Dataset>, String> {
+        let query = zsync::zfs::ListQuery { types: Some(types.into()), recursive: true, sort_createtxg: true, ..Default::default() };
+        let selector = zsync::select::Selector::new(&args.str("glob"), &args.str("exclude")).map_err(|e| e.to_string())?;
+        Ok(completion_list(&ctx, &h, query)?.into_iter().filter(|d| selector.matches(d.dataset())).collect())
+    };
+    let src = || args.opt("source-host");
+    match (cmd, name) {
+        (_, "glob") => {
+            let mut out: Vec<String> = config.presets.keys().cloned().collect();
+            // A host problem shouldn't hide the presets.
+            match host(src()).and_then(datasets) {
+                Ok(d) => out.extend(d),
+                Err(e) if out.is_empty() => return Err(e),
+                Err(_) => {}
+            }
+            Ok(out)
+        }
+        ("receive", "destination") | (_, "dataset") => datasets(host(None)?),
+        (_, "destination") => datasets(host(args.opt("destination-host"))?),
+        (_, "source") => datasets(host(src())?),
+        (_, "source-host") | (_, "destination-host") => Ok(known_hosts(&config)),
+        (_, "tag") => {
+            let snaps = snapshots(host(src())?, "snapshot")?;
+            Ok(completion::tags_from(&args.str("prefix"), snaps.iter().map(|d| d.short())))
+        }
+        ("rotate", "snapshot") => {
+            let mut names: Vec<String> = snapshots(host(src())?, "snapshot")?.iter().map(|d| d.short().to_string()).collect();
+            names.sort();
+            names.dedup();
+            Ok(names)
+        }
+        ("send", "snapshot") => Ok(snapshots(host(None)?, "snapshot")?.into_iter().map(|d| d.name).collect()),
+        ("send", "incremental") => Ok(snapshots(host(None)?, "snapshot,bookmark")?.into_iter().map(|d| d.name).collect()),
+        _ => Err(format!("nothing to complete for {name}")),
+    }
+}
+
+/// Hosts from ~/.ssh/config, ~/.ssh/known_hosts and every host named in config files and presets.
+fn known_hosts(config: &Config) -> Vec<String> {
+    let mut hosts: std::collections::BTreeSet<String> =
+        std::env::var_os("HOME").map(|h| completion::ssh_hosts(std::path::Path::new(&h))).unwrap_or_default().into_iter().collect();
+    let settings = std::iter::once(&config.defaults).chain(config.presets.values());
+    for s in settings {
+        for key in ["source-host", "destination-host"] {
+            hosts.extend(s.get(key).into_iter().flatten().filter(|h| !h.is_empty()).cloned());
+        }
+    }
+    hosts.into_iter().collect()
 }
 
 fn ctx_from(a: &Args) -> Result<Ctx, String> {

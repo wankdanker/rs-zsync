@@ -83,8 +83,8 @@ dependencies = [
 
 [[package]]
 name = "clyops"
-version = "0.12.2"
-source = "git+https://github.com/wankdanker/clyops?rev=a2b251eef232f20f1ac1feaa7213d11d4c0cd4d3#a2b251eef232f20f1ac1feaa7213d11d4c0cd4d3"
+version = "0.13.0"
+source = "git+https://github.com/wankdanker/clyops?rev=669c4cd73e14f011e84464956e802fe2c7aabd7c#669c4cd73e14f011e84464956e802fe2c7aabd7c"
 dependencies = [
  "regex",
 ]
@@ -538,7 +538,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zsync"
-version = "4.0.0-alpha.1"
+version = "4.0.0-alpha.2"
 dependencies = [
  "anyhow",
  "chrono",

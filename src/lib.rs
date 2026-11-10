@@ -13,6 +13,7 @@
 pub mod log;
 
 pub mod backend;
+pub mod complete;
 pub mod config;
 pub mod dateformat;
 pub mod exec;

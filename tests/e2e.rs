@@ -766,3 +766,122 @@ fn help_schema_and_errors() {
     assert_eq!(j["ok"], false);
     let _ = Path::new("");
 }
+
+/// `--complete-values NAME PREFIX LIMIT OFFSET -- WORDS` (clyops 0.13, spec 9.3).
+fn values(e: &Env, name: &str, prefix: &str, words: &[&str]) -> serde_json::Value {
+    let mut args = vec!["--complete-values", name, prefix, "100", "0", "--"];
+    args.extend(words);
+    serde_json::from_str(&e.ok(&args)).unwrap()
+}
+
+fn listed(v: &serde_json::Value) -> Vec<String> {
+    v["values"].as_array().unwrap().iter().map(|x| x.as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn completion_values() {
+    let e = Env::new();
+    e.create("local", &["tank/a", "tank/b"]);
+    e.snap("local", "tank/a@zsync-hourly-1");
+    e.snap("local", "tank/a@zsync-daily-2");
+    e.snap("local", "tank/b@manual");
+    e.create("backup", &["bk/vms"]);
+    std::fs::create_dir_all(e.p(".ssh")).unwrap();
+    std::fs::write(e.p(".ssh/config"), "Host backup nas\n  User root\nHost *.lan\n").unwrap();
+    std::fs::write(e.p(".ssh/known_hosts"), "offsite,10.0.0.9 ssh-ed25519 AAAA\n|1|hashed= ssh-rsa AAAA\n").unwrap();
+    std::fs::write(e.p(".zsync.json"), r#"{"nightly": {"glob": "tank/*", "destination": "bk", "destinationHost": "backup"}}"#).unwrap();
+
+    // glob slot: presets, then datasets on the source host
+    assert_eq!(listed(&values(&e, "ARGS", "", &["push"])), s(&["nightly", "tank", "tank/a", "tank/b"]));
+    assert_eq!(listed(&values(&e, "ARGS", "", &["list"])), s(&["nightly", "tank", "tank/a", "tank/b"]));
+    // destination slot: datasets on -D, through ssh
+    assert_eq!(listed(&values(&e, "ARGS", "", &["push", "-D", "backup", "tank/a"])), s(&["bk", "bk/vms"]));
+    // ... or on the preset's destination host
+    assert_eq!(listed(&values(&e, "ARGS", "", &["push", "nightly"])), s(&["bk", "bk/vms"]));
+    // host slot: ssh config, known_hosts and config hosts
+    let hosts = s(&["10.0.0.9", "backup", "nas", "offsite"]);
+    assert_eq!(listed(&values(&e, "ARGS", "", &["push", "tank/a", "bk"])), hosts);
+    assert_eq!(listed(&values(&e, "destination-host", "", &["push"])), hosts);
+    assert_eq!(listed(&values(&e, "ARGS", "", &["pull", "tank/a"])), hosts);
+    // options
+    assert_eq!(listed(&values(&e, "source", "tank/", &["status"])), s(&["tank/a", "tank/b"]));
+    assert_eq!(listed(&values(&e, "destination", "", &["push", "-D", "backup"])), s(&["bk", "bk/vms"]));
+    // tags and snapshots
+    assert_eq!(listed(&values(&e, "ARGS", "", &["rotate", "tank/a"])), s(&["daily", "hourly"]));
+    assert_eq!(listed(&values(&e, "tag", "", &["snapshot", "-g", "tank/*"])), s(&["daily", "hourly"]));
+    assert_eq!(listed(&values(&e, "snapshot", "", &["rotate", "tank/b"])), s(&["manual"]));
+    assert_eq!(listed(&values(&e, "snapshot", "", &["send"])), s(&["tank/a@zsync-hourly-1", "tank/a@zsync-daily-2", "tank/b@manual"]));
+    assert_eq!(
+        listed(&values(&e, "ARGS", "", &["destroy"])),
+        s(&["bk/vms", "tank", "tank/a", "tank/b"]).into_iter().filter(|d| d.starts_with("tank")).collect::<Vec<_>>()
+    );
+    // prefix and paging
+    let v: serde_json::Value = serde_json::from_str(&e.ok(&["--complete-values", "ARGS", "tank/", "1", "0", "--", "push"])).unwrap();
+    assert_eq!(listed(&v), s(&["tank/a"]));
+    assert_eq!(v["more"], true);
+    // slots with nothing to offer fall back (completer fails)
+    let (_, err) = e.fails(&["--complete-values", "ARGS", "", "10", "0", "--", "rotate", "tank/a", "hourly"], 1);
+    assert!(err.contains("Completer for 'ARGS' failed"), "{err}");
+
+    // the schema marks dynamic inputs
+    let schema: serde_json::Value = serde_json::from_str(&e.ok(&["--help-json-schema"])).unwrap();
+    let push = schema["commands"].as_array().unwrap().iter().find(|c| c["name"] == "push").unwrap();
+    assert_eq!(push["arguments"][0]["dynamic"], true);
+    let dest = push["options"].as_array().unwrap().iter().find(|o| o["name"] == "destination").unwrap();
+    assert_eq!(dest["dynamic"], true);
+
+    // shell completion gets the same values as a choice record
+    let out = e.ok(&["--bash-completion", "--", "push", "-D", "backup", "tank/a"]);
+    assert!(out.lines().any(|l| l.starts_with("arg\tARGS\tvariadic\tchoice\tbk,bk/vms")), "{out}");
+}
+
+#[test]
+fn completion_remote_switch_and_unreachable_hosts() {
+    let e = Env::new();
+    e.create("local", &["tank/a"]);
+    e.create("backup", &["bk"]);
+    let words = ["push", "-D", "backup", "tank/a"];
+    assert_eq!(listed(&values(&e, "ARGS", "", &words)), s(&["bk"]));
+
+    // off on the command line, in the environment, or in config: remote slots fall back
+    let mut off = vec!["--complete-values", "ARGS", "", "10", "0", "--", "push", "--complete-remote=false", "-D", "backup", "tank/a"];
+    e.fails(&off, 1);
+    off.truncate(6);
+    off.extend(words);
+    let out = e.cmd(env!("CARGO_BIN_EXE_zsync")).env("ZSYNC_COMPLETE_REMOTE", "false").args(&off).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    std::fs::create_dir_all(e.p(".config/zsync")).unwrap();
+    std::fs::write(e.p(".config/zsync/zsync.conf"), "complete-remote=false\n").unwrap();
+    e.fails(&off, 1);
+    // local slots still work with it off
+    assert_eq!(listed(&values(&e, "ARGS", "", &["push"])), s(&["tank", "tank/a"]));
+    std::fs::remove_file(e.p(".config/zsync/zsync.conf")).unwrap();
+
+    // an unreachable host fails fast instead of hanging the shell
+    let start = std::time::Instant::now();
+    e.fails(&["--complete-values", "ARGS", "", "10", "0", "--", "push", "-D", "unreachable", "tank/a"], 1);
+    assert!(start.elapsed() < std::time::Duration::from_secs(5), "{:?}", start.elapsed());
+    // and a host that hangs is cut off by the deadline
+    let start = std::time::Instant::now();
+    let out = e
+        .cmd(env!("CARGO_BIN_EXE_zsync"))
+        .env("ZSYNC_COMPLETE_TIMEOUT", "1")
+        .args(["--complete-values", "ARGS", "", "10", "0", "--", "push", "--ssh-program", "sh -c 'sleep 30' x", "-D", "slow", "tank/a"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
+}
+
+#[test]
+fn preset_occupies_the_first_slot() {
+    let e = Env::new();
+    e.create("local", &["tank/a"]);
+    e.create("backup", &["bk", "other"]);
+    e.snap("local", "tank/a@1");
+    std::fs::write(e.p(".zsync.json"), r#"{"p": {"glob": "tank/*", "destination": "bk", "destinationHost": "backup"}}"#).unwrap();
+    // the word after the preset name is the destination, as in node-zsync
+    e.ok(&["push", "p", "other"]);
+    assert_eq!(e.snaps("backup", "other/a"), s(&["1"]));
+    assert!(!e.exists("backup", "bk/a"));
+}

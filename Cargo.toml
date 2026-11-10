@@ -1,6 +1,6 @@
 [package]
 name = "zsync"
-version = "4.0.0-alpha.1"
+version = "4.0.0-alpha.2"
 edition = "2021"
 rust-version = "1.75"
 description = "Replicate ZFS datasets by glob: find the latest common snapshot and send exactly what is missing."
@@ -43,7 +43,7 @@ fakes = []
 zfs-it = []
 
 [dependencies]
-clyops = { git = "https://github.com/wankdanker/clyops", rev = "a2b251eef232f20f1ac1feaa7213d11d4c0cd4d3" }
+clyops = { git = "https://github.com/wankdanker/clyops", rev = "669c4cd73e14f011e84464956e802fe2c7aabd7c" }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 globset = { version = "0.4", default-features = false }
