@@ -1,6 +1,6 @@
 [package]
 name = "zsync"
-version = "4.0.0-alpha.2"
+version = "4.0.0-alpha.3"
 edition = "2021"
 rust-version = "1.75"
 description = "Replicate ZFS datasets by glob: find the latest common snapshot and send exactly what is missing."
