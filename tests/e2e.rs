@@ -885,3 +885,87 @@ fn preset_occupies_the_first_slot() {
     assert_eq!(e.snaps("backup", "other/a"), s(&["1"]));
     assert!(!e.exists("backup", "bk/a"));
 }
+
+#[test]
+fn all_presets() {
+    let e = Env::new();
+    e.create("local", &["tank/a", "data/b"]);
+    e.snap("local", "tank/a@1");
+    e.snap("local", "data/b@1");
+    e.create("backup", &["bk"]);
+    e.create("offsite", &["vault"]);
+    std::fs::write(
+        e.p(".zsync.json"),
+        r#"{"nightly": {"glob": "tank/*", "destination": "bk", "destinationHost": "backup"},
+            "weekly": {"glob": "data/*", "destination": "vault", "destinationHost": "offsite"}}"#,
+    )
+    .unwrap();
+
+    let out = e.ok(&["status", "--all"]);
+    assert!(out.starts_with("preset   source  destination  destination-host  up-to-date  latest-snap-shot\n"), "{out}");
+    assert!(out.contains("nightly  tank/a  bk/a         backup            false"), "{out}");
+    assert!(out.contains("weekly   data/b  vault/b      offsite           false"), "{out}");
+
+    assert_eq!(e.ok(&["push", "--all"]), "nightly: done\nweekly: done\n");
+    assert_eq!(e.snaps("backup", "bk/a"), s(&["1"]));
+    assert_eq!(e.snaps("offsite", "vault/b"), s(&["1"]));
+
+    let j = e.json(&["status", "--all"]);
+    let presets = j["result"]["presets"].as_array().unwrap();
+    assert_eq!(presets.len(), 2);
+    assert_eq!(presets[0]["preset"], "nightly");
+    assert_eq!(presets[0]["results"][0]["upToDate"], true);
+    assert_eq!(presets[1]["results"][0]["destination"], "vault/b");
+
+    // options on the command line apply to every preset
+    let out = e.ok(&["push", "--all", "--dry-run"]);
+    assert!(out.lines().next().unwrap().starts_with("preset"), "{out}");
+    assert!(out.contains("nightly") && out.contains("up-to-date"), "{out}");
+
+    // one broken preset doesn't stop the others; exit 3
+    std::fs::write(
+        e.p(".zsync.json"),
+        r#"{"bad": {"glob": "tank/*", "destination": "x", "destinationHost": "unreachable"},
+            "nightly": {"glob": "tank/*", "destination": "bk", "destinationHost": "backup"}}"#,
+    )
+    .unwrap();
+    let (out, err) = e.fails(&["status", "--all"], 3);
+    assert!(out.contains("bad") && out.contains("error"), "{out}");
+    assert!(out.contains("nightly  tank/a  bk/a         backup            true"), "{out}");
+    assert!(err.contains("zsync: bad: ") && err.contains("Could not resolve hostname"), "{err}");
+    let (out, _) = e.fails(&["status", "--all", "-f", "json"], 3);
+    let j: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(j["result"]["presets"][0]["error"].as_str().unwrap().contains("unreachable"));
+
+    // misuse
+    let (_, err) = e.fails(&["status", "--all", "tank/a"], 1);
+    assert!(err.contains("don't also give a glob"), "{err}");
+    std::fs::write(e.p(".zsync.json"), "{}").unwrap();
+    let (_, err) = e.fails(&["push", "--all"], 1);
+    assert!(err.contains("no presets are defined"), "{err}");
+}
+
+#[test]
+fn closed_stdout_exits_quietly() {
+    let e = Env::new();
+    e.create("local", &["tank/a"]);
+    for args in [vec!["status", "--help"], vec!["list"], vec!["--help-json-schema"]] {
+        // A pipe whose reader is already gone, as with `zsync ... | missing-command`.
+        let mut fds = [0i32; 2];
+        // SAFETY: pipe(2) fills two descriptors we own.
+        assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: closing our own read end.
+        unsafe { close(fds[0]) };
+        // SAFETY: the write end is ours and handed to the child.
+        let stdout = unsafe { <std::fs::File as std::os::unix::io::FromRawFd>::from_raw_fd(fds[1]) };
+        let out = e.cmd(env!("CARGO_BIN_EXE_zsync")).args(&args).stdout(stdout).stderr(Stdio::piped()).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(141), "{args:?}: {err}");
+        assert!(!err.contains("panicked"), "{args:?}: {err}");
+    }
+}
+
+extern "C" {
+    fn pipe(fds: *mut i32) -> i32;
+    fn close(fd: i32) -> i32;
+}

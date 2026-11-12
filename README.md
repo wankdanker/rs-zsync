@@ -254,6 +254,30 @@ zsync exits with status 2. Every option can also be set through an environment v
 `ZSYNC_<OPTION>`, e.g. `ZSYNC_DESTINATION_HOST`. Precedence, highest first: command-line
 options, positionals, presets, environment, built-in defaults.
 
+
+### Every preset at once
+
+`--all` on `status`, `push` and `pull` runs the command once for each preset, in name order,
+as if you had typed each preset name in the first slot. Options you give on the command line
+(`--dry-run`, `-f json`, `--transport tcp`, ...) apply to every preset.
+
+```sh
+$ zsync status --all
+preset   source  destination  destination-host  up-to-date  latest-snap-shot
+nightly  tank/a  bk/a         backup            true        tank/a@zsync-hourly-20241101
+weekly   data/b  vault/b      offsite           false
+
+$ zsync push --all          # one cron entry for every preset
+nightly: done
+weekly: done
+```
+
+A preset that fails (an unreachable host, a missing dataset) is reported, the rest still run,
+and the exit status is 3. With `-f json` the result is `{"presets": [{"preset": ..., "results":
+[...], "failures": [...]} or {"preset": ..., "error": ...}]}`. `--all` can't be combined with a
+glob or preset on the command line. (`prune --all` is different: it means every snapshot, not
+only zsync's.)
+
 ## Locking, output and exit codes
 
 * `-l/--lock-file PATH` takes an flock on PATH so overlapping runs (cron) don't collide.
@@ -265,7 +289,9 @@ options, positionals, presets, environment, built-in defaults.
 * `--dry-run` (push, snapshot, rotate, prune, destroy, rename) shows the plan without changing
   anything.
 * Exit codes: `0` success, `1` error, `2` config file not found, `3` some datasets failed under
-  `--continue`.
+  `--continue` (or some presets failed under `--all`), `141` stdout was closed early (for example
+  piped into `head` or into a command that doesn't exist), which zsync treats like other Unix
+  tools do: it stops quietly.
 
 ## Library
 
