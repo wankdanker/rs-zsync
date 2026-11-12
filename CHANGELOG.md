@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `status --all`, `push --all` and `pull --all` run the command for every preset in the config
+  files, with one table (a `preset` column) or a `presets` array in JSON. A failing preset doesn't
+  stop the others; the exit status is then 3.
+
+### Fixed
+
+- Writing to a closed pipe (`zsync status --help | missing-command`, `zsync list | head`) no
+  longer panics: zsync exits quietly with status 141.
+
 ## 4.0.0-alpha.2
 
 ### Added

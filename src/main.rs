@@ -23,6 +23,8 @@ use zsync::zfs::{RecvSpec, RenameOpts, SendSpec};
 const EXIT_ERROR: i32 = 1;
 const EXIT_CONFIG: i32 = 2;
 const EXIT_PARTIAL: i32 = 3;
+/// 128 + SIGPIPE, what a shell reports for a process killed by a broken pipe.
+const EXIT_BROKEN_PIPE: i32 = 141;
 
 /// long option name -> (env/var name, is array), and each command's option shapes (for completion).
 #[derive(Default)]
@@ -222,6 +224,7 @@ fn build(reg: &mut Registry) -> Cli {
         c.effects(&["read-only"]);
         Reg { cli: &mut *c, reg, cmd: "status" }.ssh().select("Send all fileystems/volumes in source-dataset").dest()
             .o("continue", "c", "flag", "continue on to the next dataset if errors are encountered", "Control", "")
+            .o("all", "", "flag", "run for every preset in the config files, one table with a preset column", "Selection", "")
             .common(true);
         completers(c, "status", reg);
     }
@@ -232,7 +235,9 @@ fn build(reg: &mut Registry) -> Cli {
         let c = cli.command(name, desc);
         c.arg_variadic("ARGS", args, "");
         c.effects(&["network"]);
-        Reg { cli: &mut *c, reg, cmd: name }.ssh().select("Send all fileystems/volumes in source-dataset").dest().transfer().common(true);
+        Reg { cli: &mut *c, reg, cmd: name }.ssh().select("Send all fileystems/volumes in source-dataset").dest().transfer()
+            .o("all", "", "flag", "run for every preset in the config files, one after another", "Selection", "")
+            .common(true);
         completers(c, name, reg);
     }
     {
@@ -562,20 +567,29 @@ fn complete_slot(cmd: &'static str, slot: Slot, shapes: &OptionShapes, req: &Com
 fn resolve_typed(cmd: &str, words: &[String]) -> Result<(Args, Config), String> {
     let mut argv: Vec<String> = cmd.split(' ').map(String::from).collect();
     argv.extend(words.iter().cloned());
-    let p = match prepare(&argv) {
+    let (_, args, config) = parse_quiet(&argv, false).map_err(|e| e.unwrap_or_else(|| "cannot parse the words typed so far".into()))?;
+    Ok((args, config))
+}
+
+/// Both parse passes without printing or exiting. `Err(None)` means clyops couldn't parse the
+/// line; `Err(Some(msg))` is a config or argument error.
+fn parse_quiet(argv: &[String], strict: bool) -> Result<(Cli, Args, Config), Option<String>> {
+    let p = match prepare(argv) {
         Ok(p) => p,
-        Err(PrepError::Usage) => return Err("cannot parse the words typed so far".into()),
-        Err(PrepError::Config(_, msg, _)) => return Err(msg),
+        Err(PrepError::Usage) => return Err(None),
+        Err(PrepError::Config(_, msg, _)) => return Err(Some(msg)),
     };
     let mut reg = Registry::default();
     let mut cli = build(&mut reg);
     cli.env(p.env.clone());
-    if !matches!(cli.parse(&argv), Parsed::Ok) {
-        return Err("cannot parse the words typed so far".into());
+    match cli.parse(argv) {
+        Parsed::Ok => {}
+        Parsed::Error { message, .. } => return Err(Some(message)),
+        Parsed::Help => return Err(None),
     }
     let values = cli.values().clone();
-    let args = make_args(&cli, values, reg, &p, false)?;
-    Ok((args, p.config))
+    let args = make_args(&cli, values, reg, &p, strict)?;
+    Ok((cli, args, p.config))
 }
 
 /// Results of zfs listings made during one completion request (bash asks every completer at
@@ -821,72 +835,21 @@ fn run(cli: &Cli, a: &Args, cmd: &str) -> Result<i32, String> {
             }
             Ok(0)
         }
+        "status" | "push" | "pull" if a.flag("all") => run_all(a, cmd),
         "status" => {
-            let ctx = ctx_from(a)?;
-            let dest = destination(&ctx, a)?;
-            if dest.base.is_empty() {
-                return Err("a destination is required (positional or -d/--destination)".into());
-            }
-            let out = ops::status::status(&ctx, &selection(&ctx, a), &dest, true, false).map_err(e)?;
+            let (out, dest_host) = status_outcome(a)?;
             Ok(finish(json, &out, |o| {
-                let mut rows =
-                    vec![["source", "destination", "destination-host", "up-to-date", "latest-snap-shot"].map(String::from).to_vec()];
-                for r in &o.results {
-                    rows.push(vec![
-                        r.source.clone(),
-                        r.destination.clone(),
-                        r.destination_host.clone(),
-                        r.up_to_date.to_string(),
-                        r.latest.clone().unwrap_or_default(),
-                    ]);
-                }
-                for f in &o.failures {
-                    rows.push(vec![f.dataset.clone(), String::new(), dest.host.label().into(), "error".into(), String::new()]);
-                }
+                let mut rows = vec![STATUS_HEADER.map(String::from).to_vec()];
+                rows.extend(status_rows(o, &dest_host));
                 println!("{}", table(&rows));
             }))
         }
         "push" | "pull" => {
-            let ctx = ctx_from(a)?;
-            let sel = selection(&ctx, a);
-            let opts = ops::push::PushOpts {
-                dest: destination(&ctx, a)?,
-                force: a.flag("force"),
-                replication: a.flag("replication"),
-                properties: a.flag("properties"),
-                intermediary: !a.flag("latest"),
-                compressed: a.flag("compressed"),
-                raw: a.flag("raw"),
-                large_block: a.flag("large-block"),
-                unmounted: a.flag("unmounted"),
-                fallback_destroy: a.flag("fallback-destroy-destination"),
-                fallback_rename: a.flag("fallback-rename-destination"),
-                resumable: a.str("resumable") != "false",
-                abort_resume: a.flag("abort-resume"),
-                retries: a.num("retries")?.unwrap_or(0) as u32,
-                bookmark: a.flag("bookmark"),
-                prefix: a.str("prefix"),
-                path: data_path(a)?,
-                progress: progress_sink(cli, a.flag("progress")),
-            };
-            let out = ops::push::push(&ctx, &sel, &opts).map_err(e)?;
+            let (out, dry_run) = push_outcome(cli, a)?;
             Ok(finish(json, &out, |o| {
-                if ctx.dry_run {
-                    let mut rows = vec![["source", "destination", "destination-host", "action", "from", "to"].map(String::from).to_vec()];
-                    for r in &o.results {
-                        let action = match &r.fallback {
-                            Some(f) => format!("{} ({f})", r.action),
-                            None => r.action.clone(),
-                        };
-                        rows.push(vec![
-                            r.source.clone(),
-                            r.destination.clone(),
-                            r.destination_host.clone(),
-                            action,
-                            r.from.clone().unwrap_or_default(),
-                            r.to.clone().unwrap_or_default(),
-                        ]);
-                    }
+                if dry_run {
+                    let mut rows = vec![PUSH_HEADER.map(String::from).to_vec()];
+                    rows.extend(push_rows(o));
                     println!("{}", table(&rows));
                 } else {
                     println!("done");
@@ -990,6 +953,185 @@ fn run(cli: &Cli, a: &Args, cmd: &str) -> Result<i32, String> {
     }
 }
 
+const STATUS_HEADER: [&str; 5] = ["source", "destination", "destination-host", "up-to-date", "latest-snap-shot"];
+const PUSH_HEADER: [&str; 6] = ["source", "destination", "destination-host", "action", "from", "to"];
+
+fn status_outcome(a: &Args) -> Result<(Outcome<ops::status::StatusRow>, String), String> {
+    let ctx = ctx_from(a)?;
+    let dest = destination(&ctx, a)?;
+    if dest.base.is_empty() {
+        return Err("a destination is required (positional or -d/--destination)".into());
+    }
+    let out = ops::status::status(&ctx, &selection(&ctx, a), &dest, true, false).map_err(|e| format!("{e:#}"))?;
+    Ok((out, dest.host.label().to_string()))
+}
+
+fn status_rows(o: &Outcome<ops::status::StatusRow>, dest_host: &str) -> Vec<Vec<String>> {
+    let mut rows: Vec<Vec<String>> = o
+        .results
+        .iter()
+        .map(|r| {
+            vec![
+                r.source.clone(),
+                r.destination.clone(),
+                r.destination_host.clone(),
+                r.up_to_date.to_string(),
+                r.latest.clone().unwrap_or_default(),
+            ]
+        })
+        .collect();
+    for f in &o.failures {
+        rows.push(vec![f.dataset.clone(), String::new(), dest_host.into(), "error".into(), String::new()]);
+    }
+    rows
+}
+
+fn push_outcome(cli: &Cli, a: &Args) -> Result<(Outcome<ops::push::PushResult>, bool), String> {
+    let ctx = ctx_from(a)?;
+    let sel = selection(&ctx, a);
+    let opts = ops::push::PushOpts {
+        dest: destination(&ctx, a)?,
+        force: a.flag("force"),
+        replication: a.flag("replication"),
+        properties: a.flag("properties"),
+        intermediary: !a.flag("latest"),
+        compressed: a.flag("compressed"),
+        raw: a.flag("raw"),
+        large_block: a.flag("large-block"),
+        unmounted: a.flag("unmounted"),
+        fallback_destroy: a.flag("fallback-destroy-destination"),
+        fallback_rename: a.flag("fallback-rename-destination"),
+        resumable: a.str("resumable") != "false",
+        abort_resume: a.flag("abort-resume"),
+        retries: a.num("retries")?.unwrap_or(0) as u32,
+        bookmark: a.flag("bookmark"),
+        prefix: a.str("prefix"),
+        path: data_path(a)?,
+        progress: progress_sink(cli, a.flag("progress")),
+    };
+    let out = ops::push::push(&ctx, &sel, &opts).map_err(|e| format!("{e:#}"))?;
+    Ok((out, ctx.dry_run))
+}
+
+fn push_rows(o: &Outcome<ops::push::PushResult>) -> Vec<Vec<String>> {
+    o.results
+        .iter()
+        .map(|r| {
+            let action = match &r.fallback {
+                Some(f) => format!("{} ({f})", r.action),
+                None => r.action.clone(),
+            };
+            vec![
+                r.source.clone(),
+                r.destination.clone(),
+                r.destination_host.clone(),
+                action,
+                r.from.clone().unwrap_or_default(),
+                r.to.clone().unwrap_or_default(),
+            ]
+        })
+        .collect()
+}
+
+/// One preset's part of an `--all` run.
+#[derive(serde::Serialize)]
+struct PresetRun<T: serde::Serialize> {
+    preset: String,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    outcome: Option<Outcome<T>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// `status --all` / `push --all`: run the command once per preset, as if each preset name had
+/// been given in the first slot with the rest of the command line, and report them together.
+/// A preset that fails doesn't stop the others; the exit code is then 3.
+fn run_all(a: &Args, cmd: &str) -> Result<i32, String> {
+    let json = a.str("format") == "json";
+    if !a.positional.is_empty() {
+        return Err("--all runs every preset in the config files; don't also give a glob, preset or other positional".into());
+    }
+    let config = load_config(a.opt("config").as_deref()).map_err(|(_, m)| m)?;
+    if config.presets.is_empty() {
+        return Err("--all: no presets are defined in the config files".into());
+    }
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let at = argv.iter().position(|w| w == cmd).ok_or("--all: cannot find the command word")?;
+    let args_for = |preset: &str| -> Vec<String> {
+        let mut v: Vec<String> = argv.iter().filter(|w| *w != "--all" && *w != "--all=true").cloned().collect();
+        let at = if argv[..at].iter().any(|w| w == "--all" || w == "--all=true") { at - 1 } else { at };
+        v.insert(at + 1, preset.to_string());
+        v
+    };
+    let parse = |preset: &str| -> Result<(Cli, Args), String> {
+        parse_quiet(&args_for(preset), true)
+            .map(|(cli, args, _)| (cli, args))
+            .map_err(|e| e.unwrap_or_else(|| "cannot parse the command line for this preset".into()))
+    };
+    let mut failed = false;
+    if cmd == "status" {
+        let mut runs = Vec::new();
+        let mut rows = vec![["preset"].into_iter().chain(STATUS_HEADER).map(String::from).collect::<Vec<_>>()];
+        for name in config.presets.keys() {
+            match parse(name).and_then(|(_, args)| status_outcome(&args)) {
+                Ok((out, dest_host)) => {
+                    failed |= !out.failures.is_empty();
+                    rows.extend(status_rows(&out, &dest_host).into_iter().map(|r| std::iter::once(name.clone()).chain(r).collect()));
+                    runs.push(PresetRun { preset: name.clone(), outcome: Some(out), error: None });
+                }
+                Err(e) => {
+                    failed = true;
+                    if !json {
+                        eprintln!("zsync: {name}: {e}");
+                    }
+                    rows.push(vec![name.clone(), String::new(), String::new(), String::new(), "error".into(), String::new()]);
+                    runs.push(PresetRun { preset: name.clone(), outcome: None, error: Some(e) });
+                }
+            }
+        }
+        if json {
+            println!("{}", json_ok(&serde_json::json!({ "presets": runs })));
+        } else {
+            println!("{}", table(&rows));
+        }
+    } else {
+        let mut runs = Vec::new();
+        let mut rows = vec![["preset"].into_iter().chain(PUSH_HEADER).map(String::from).collect::<Vec<_>>()];
+        let mut dry_run = false;
+        for name in config.presets.keys() {
+            match parse(name).and_then(|(cli, args)| push_outcome(&cli, &args)) {
+                Ok((out, dry)) => {
+                    dry_run = dry;
+                    failed |= !out.failures.is_empty();
+                    if !json && !dry {
+                        let note =
+                            if out.failures.is_empty() { String::new() } else { format!(" ({} dataset(s) failed)", out.failures.len()) };
+                        println!("{name}: done{note}");
+                    }
+                    rows.extend(push_rows(&out).into_iter().map(|r| std::iter::once(name.clone()).chain(r).collect()));
+                    runs.push(PresetRun { preset: name.clone(), outcome: Some(out), error: None });
+                }
+                Err(e) => {
+                    failed = true;
+                    if !json {
+                        eprintln!("zsync: {name}: {e}");
+                    }
+                    runs.push(PresetRun { preset: name.clone(), outcome: None, error: Some(e) });
+                }
+            }
+        }
+        if json {
+            println!("{}", json_ok(&serde_json::json!({ "presets": runs })));
+        } else if dry_run {
+            println!("{}", table(&rows));
+        }
+    }
+    if failed && !json {
+        eprintln!("zsync: some presets or datasets failed");
+    }
+    Ok(if failed { EXIT_PARTIAL } else { 0 })
+}
+
 fn print_destroyed(dry_run: bool, o: &Outcome<ops::rotate::Destroyed>) {
     if dry_run {
         for d in &o.results {
@@ -1002,7 +1144,23 @@ fn print_destroyed(dry_run: bool, o: &Outcome<ops::rotate::Destroyed>) {
     }
 }
 
+/// Printing to a closed pipe (`zsync ... | head`, or a reader that never started) makes Rust's
+/// print macros panic. Exit quietly with the status a SIGPIPE'd process gets instead, like other
+/// Unix tools. Other panics keep the normal report.
+fn quiet_broken_pipe() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let msg = payload.downcast_ref::<String>().map(String::as_str).or_else(|| payload.downcast_ref::<&str>().copied()).unwrap_or("");
+        if msg.starts_with("failed printing to std") && msg.contains("Broken pipe") {
+            std::process::exit(EXIT_BROKEN_PIPE);
+        }
+        default(info);
+    }));
+}
+
 fn main() {
+    quiet_broken_pipe();
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() {
         let mut reg = Registry::default();
